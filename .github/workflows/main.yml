@@ -1,70 +1,96 @@
-- name: Run SOCKS5 proxy with auth
-  run: |
-    python3 - << 'EOF'
-    import socket, threading
+name: SOCKS5 Proxy with Tailscale
 
-    USERNAME = "user"
-    PASSWORD = "pass"
+on:
+  workflow_dispatch:
 
-    def handle_client(client):
-        try:
-            # greeting
-            data = client.recv(262)
-            client.sendall(b"\x05\x02")  # username/password auth
+jobs:
+  proxy:
+    runs-on: ubuntu-latest
 
-            # auth
-            version = client.recv(1)
-            username_len = client.recv(1)[0]
-            username = client.recv(username_len).decode()
-            password_len = client.recv(1)[0]
-            password = client.recv(password_len).decode()
+    env:
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      PROXY_USER: ${{ secrets.PROXY_USER }}
+      PROXY_PASS: ${{ secrets.PROXY_PASS }}
 
-            if username != USERNAME or password != PASSWORD:
-                client.sendall(b"\x01\x01")
-                client.close()
-                return
+    steps:
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale up --authkey "$TAILSCALE_AUTHKEY"
 
-            client.sendall(b"\x01\x00")
+      - name: Show Tailscale IP
+        run: |
+          tailscale ip -4
 
-            # request
-            version, cmd, _, addr_type = client.recv(4)
+      - name: Run SOCKS5 proxy with auth
+        run: |
+          python3 - << 'EOF'
+          import socket, threading, os
 
-            if addr_type == 1:
-                addr = socket.inet_ntoa(client.recv(4))
-            else:
-                client.close()
-                return
+          USERNAME = os.getenv("PROXY_USER")
+          PASSWORD = os.getenv("PROXY_PASS")
 
-            port = int.from_bytes(client.recv(2), 'big')
+          def handle_client(client):
+              try:
+                  client.recv(262)
+                  client.sendall(b"\x05\x02")
 
-            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            remote.connect((addr, port))
+                  version = client.recv(1)
+                  username_len = client.recv(1)[0]
+                  username = client.recv(username_len).decode()
+                  password_len = client.recv(1)[0]
+                  password = client.recv(password_len).decode()
 
-            client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton(addr) + port.to_bytes(2, 'big'))
+                  if username != USERNAME or password != PASSWORD:
+                      client.sendall(b"\x01\x01")
+                      client.close()
+                      return
 
-            def forward(src, dst):
-                while True:
-                    data = src.recv(4096)
-                    if not data:
-                        break
-                    dst.sendall(data)
+                  client.sendall(b"\x01\x00")
 
-            threading.Thread(target=forward, args=(client, remote)).start()
-            threading.Thread(target=forward, args=(remote, client)).start()
+                  version, cmd, _, addr_type = client.recv(4)
 
-        except:
-            client.close()
+                  if addr_type == 1:
+                      addr = socket.inet_ntoa(client.recv(4))
+                  else:
+                      client.close()
+                      return
 
-    def start():
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.bind(("0.0.0.0", 1080))
-        server.listen(100)
+                  port = int.from_bytes(client.recv(2), 'big')
 
-        print("SOCKS5 proxy with auth running on port 1080...")
+                  remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  remote.connect((addr, port))
 
-        while True:
-            client, addr = server.accept()
-            threading.Thread(target=handle_client, args=(client,)).start()
+                  client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton(addr) + port.to_bytes(2, 'big'))
 
-    start()
-    EOF
+                  def forward(src, dst):
+                      while True:
+                          data = src.recv(4096)
+                          if not data:
+                              break
+                          dst.sendall(data)
+
+                  threading.Thread(target=forward, args=(client, remote)).start()
+                  threading.Thread(target=forward, args=(remote, client)).start()
+
+              except:
+                  client.close()
+
+          def start():
+              server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              server.bind(("0.0.0.0", 1080))
+              server.listen(100)
+
+              print("SOCKS5 proxy running on port 1080...")
+
+              while True:
+                  client, _ = server.accept()
+                  threading.Thread(target=handle_client, args=(client,)).start()
+
+          start()
+          EOF
+
+      - name: Keep alive
+        run: |
+          echo "Runner is alive..."
+          tail -f /dev/null
