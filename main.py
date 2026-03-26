@@ -1,61 +1,47 @@
 import socket
 import threading
 
-LISTEN_IP = "0.0.0.0"
-LISTEN_PORT = 1080
-
-USERNAME = "admin"
-PASSWORD = "1234"
+USERNAME = "user"
+PASSWORD = "pass"
 
 def handle_client(client):
     try:
         # greeting
-        version, nmethods = client.recv(2)
-        methods = client.recv(nmethods)
+        client.recv(262)
+        client.sendall(b"\x05\x02")  # username/password auth
 
-        # говорим: нужна авторизация (0x02)
-        client.sendall(b"\x05\x02")
-
-        # auth request
+        # auth
         version = client.recv(1)
-        ulen = client.recv(1)[0]
-        username = client.recv(ulen).decode()
-        plen = client.recv(1)[0]
-        password = client.recv(plen).decode()
+        username_len = client.recv(1)[0]
+        username = client.recv(username_len).decode()
+        password_len = client.recv(1)[0]
+        password = client.recv(password_len).decode()
 
         if username != USERNAME or password != PASSWORD:
-            client.sendall(b"\x01\x01")  # fail
+            client.sendall(b"\x01\x01")  # auth failed
             client.close()
             return
 
-        client.sendall(b"\x01\x00")  # success
+        client.sendall(b"\x01\x00")  # auth success
 
         # request
-        data = client.recv(4)
-        cmd = data[1]
+        version, cmd, _, addr_type = client.recv(4)
 
-        if cmd != 1:
-            client.close()
-            return
-
-        atyp = client.recv(1)[0]
-
-        if atyp == 1:  # IPv4
+        if addr_type == 1:  # IPv4
             addr = socket.inet_ntoa(client.recv(4))
-        elif atyp == 3:  # domain
-            domain_len = client.recv(1)[0]
-            addr = client.recv(domain_len).decode()
         else:
             client.close()
             return
 
         port = int.from_bytes(client.recv(2), 'big')
 
+        # connect to target
         remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         remote.connect((addr, port))
 
-        client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + (0).to_bytes(2, 'big'))
+        client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton(addr) + port.to_bytes(2, 'big'))
 
+        # forwarding
         def forward(src, dst):
             while True:
                 data = src.recv(4096)
@@ -71,11 +57,10 @@ def handle_client(client):
 
 def start():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((LISTEN_IP, LISTEN_PORT))
+    server.bind(("0.0.0.0", 1080))
     server.listen(100)
 
-    print(f"SOCKS5 с авторизацией запущен на {LISTEN_IP}:{LISTEN_PORT}")
-    print(f"Логин: {USERNAME} Пароль: {PASSWORD}")
+    print("SOCKS5 proxy running on port 1080...")
 
     while True:
         client, addr = server.accept()
